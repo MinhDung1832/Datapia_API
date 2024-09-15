@@ -1,0 +1,8 @@
+version: '3.7'
+
+services:
+  pdfserver:
+    build: .
+    command: uvicorn app.main:app --reload --host 0.0.0.0 --port 8010
+    ports:
+      - 8010:8010

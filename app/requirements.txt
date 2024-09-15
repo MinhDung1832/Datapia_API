@@ -1,0 +1,8 @@
+facebook_business==18.0.5
+google_api_python_client==2.127.0
+gspread==6.1.0
+numpy==1.24.4
+pandas==2.0.3
+protobuf==5.26.1
+pymongo==4.3.3
+pyodbc==4.0.39
