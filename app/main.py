@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse,JSONResponse
 from database import get_db_connection, get_db_gw_connection
+from facebook_business.adobjects.adaccount import AdAccount
+from facebook_business.api import FacebookAdsApi
 from models import OrderData
 from google.oauth2.service_account import Credentials
 import gspread
@@ -55,7 +57,7 @@ async def google_sheet(id: int):
 
             # Fetch data to populate the Google Sheet
             sql = '''
-                SELECT * FROM dbo.googlesheet_config
+                SELECT * FROM dbo.fb_data_insight
             '''
             sql_cursor.execute(sql)
             rows = sql_cursor.fetchall()
@@ -109,3 +111,179 @@ async def google_sheet(id: int):
         if conn:
             conn.close()
 
+@app.get("/import_data")
+async def import_data(id: int):
+    try:
+        # Get a database connection
+        conn = get_db_connection()
+        sql_cursor = conn.cursor()
+
+        # Fetch sheet configuration from the database
+        sql_connection_config = f'''
+            SELECT * FROM dbo.connection_config WHERE id = {id}
+        '''
+        sql_cursor.execute(sql_connection_config)
+        config_rows = sql_cursor.fetchone()
+        # print(config_rows)
+        column_names = [desc[0] for desc in sql_cursor.description]
+        # print(column_names)
+        access_token = str(config_rows[column_names.index("access_token")])
+        ad_account_id = str(config_rows[column_names.index("acc_id_val")])
+        app_secret = str(config_rows[column_names.index("app_secret")])
+        app_id = str(config_rows[column_names.index("app_id")])
+        
+        # Initialize Facebook API
+        FacebookAdsApi.init(access_token=access_token)
+
+        # Define fields and parameters for the request
+        fields = [
+            'account_currency', 'account_id', 'account_name', 'campaign_name',
+            'actions', 'ad_id', 'ad_name', 'adset_id', 'adset_name', 'campaign_id',
+            'clicks', 'cost_per_action_type', 'cost_per_unique_click', 'cpc', 'cpm',
+            'ctr', 'cost_per_conversion', 'date_start', 'frequency', 'impressions',
+            'objective', 'optimization_goal', 'outbound_clicks', 'outbound_clicks_ctr',
+            'reach', 'spend', 'conversions', 'cost_per_conversion', 'converted_product_quantity'
+        ]
+
+        params = {
+            'time_range': {'since': '2022-01-01', 'until': '2024-12-31'},
+            'time_increment': 1
+        }
+
+        # Fetch campaigns and insights
+        campaigns = AdAccount(ad_account_id).get_campaigns(params=params)
+        insights = [pd.DataFrame(campaign.get_insights(
+            params=params, fields=fields)) for campaign in campaigns]
+
+        df = pd.concat(insights, ignore_index=True) if insights else pd.DataFrame()
+
+        # Database connection
+        cursor = conn.cursor()
+
+        # Ensure all required columns are present
+        columns_to_insert = ['account_currency', 'account_id', 'account_name', 'campaign_name', 'actions',
+                             'ad_id', 'ad_name', 'adset_id', 'adset_name', 'campaign_id', 'clicks',
+                             'cost_per_action_type', 'cost_per_unique_click', 'cpc', 'cpm', 'ctr',
+                             'cost_per_conversion', 'date_start', 'frequency', 'impressions',
+                             'objective', 'optimization_goal', 'outbound_clicks', 'outbound_clicks_ctr',
+                             'reach', 'spend', 'conversions', 'cost_per_conversion', 'converted_product_quantity', 'frequency_value']
+
+        # Add missing columns
+        for column in columns_to_insert:
+            if column not in df.columns:
+                df[column] = None
+
+        # Tối ưu hóa việc thực thi các câu lệnh SQL bằng cách sử dụng batch insert thay vì insert từng dòng
+        insert_data = []
+        action_insert_data = []
+        cost_per_insert_data = []
+
+        df_list = df[columns_to_insert].to_dict(orient='records')
+        # print(df_list)
+
+
+        for row in df_list:
+            # SQL table and columns table fb_action
+            table_action = 'fb_action'
+            columns_actions = ['campaign_id', 'campaign_name', 'action_type', 'value']
+
+            # Prepare action data for insertion
+            action_insert_data = [
+                (row['campaign_id'], row['campaign_name'],
+                 action['action_type'], action['value'])
+                for action in row['actions']
+            ]
+
+            # If there is action data to insert
+            if action_insert_data:
+                placeholders_actions = ','.join(
+                    ['?' for _ in range(len(columns_actions))])
+                query_action = f"INSERT INTO {table_action} ({', '.join(columns_actions)}) VALUES ({placeholders_actions})"
+
+                # Execute the SQL command
+                cursor.executemany(query_action, action_insert_data)
+                conn.commit()
+
+            # ----------------------------------------------------------------
+            # SQL table and columns table fb_cost_per_action_type
+            table_cost_per_action_type = 'fb_cost_per_action_type'
+            columns_cost_per_action_type = [
+                'campaign_id', 'campaign_name', 'action_type', 'value']
+
+            # Prepare action data for insertion
+            cost_per_action_type_insert_data = [
+                (row['campaign_id'], row['campaign_name'],
+                 cost_per_action_type['action_type'], cost_per_action_type['value'])
+                for cost_per_action_type in row['cost_per_action_type']
+            ]
+
+            # If there is action data to insert
+            if cost_per_action_type_insert_data:
+                placeholders_cost_per_action_type = ','.join(
+                    ['?' for _ in range(len(columns_cost_per_action_type))])
+                query_cost_per_action_type = f"INSERT INTO {table_cost_per_action_type} ({', '.join(columns_cost_per_action_type)}) VALUES ({placeholders_cost_per_action_type})"
+
+                # Execute the SQL command
+                cursor.executemany(query_cost_per_action_type,
+                                   cost_per_action_type_insert_data)
+                conn.commit()
+
+            # ----------------------------------------------------------------
+            # SQL table and columns table fb_data_insight
+            table_insight = 'fb_data_insight'
+            columns_insight = ['date_start', 'account_id', 'account_name', 'campaign_id', 'campaign_name', 'adset_id', 'adset_name', 'ad_id', 'ad_name',
+                               'objective', 'optimization_goal', 'spend', 'impressions', 'reach', 'frequency_value', 'clicks', 'cost_per_unique_click', 'ctr', 'cpm']
+
+            # Prepare action data for insertion
+            insight_insert_data = [
+                (
+                    None if pd.isna(row['date_start']) else row['date_start'],
+                    None if pd.isna(row['account_id']) else row['account_id'],
+                    None if pd.isna(row['account_name']) else row['account_name'],
+                    None if pd.isna(row['campaign_id']) else row['campaign_id'],
+                    None if pd.isna(row['campaign_name']) else row['campaign_name'],
+                    None if pd.isna(row['adset_id']) else row['adset_id'],
+                    None if pd.isna(row['adset_name']) else row['adset_name'],
+                    None if pd.isna(row['ad_id']) else row['ad_id'],
+                    None if pd.isna(row['ad_name']) else row['ad_name'],
+                    None if pd.isna(row['objective']) else row['objective'],
+                    None if pd.isna(row['optimization_goal']
+                                    ) else row['optimization_goal'],
+                    None if pd.isna(row['spend']) else row['spend'],
+                    None if pd.isna(row['impressions']) else row['impressions'],
+                    None if pd.isna(row['reach']) else row['reach'],
+                    None if pd.isna(row['frequency_value']
+                                    ) else row['frequency_value'],
+                    None if pd.isna(row['clicks']) else row['clicks'],
+                    None if pd.isna(row['cost_per_unique_click']
+                                    ) else row['cost_per_unique_click'],
+                    None if pd.isna(row['ctr']) else row['ctr'],
+                    None if pd.isna(row['cpm']) else row['cpm']
+                )
+
+                # for cost_per_action_type in row['cost_per_action_type']
+            ]
+            # print(insight_insert_data)
+
+            # If there is action data to insert
+            if insight_insert_data:
+                placeholders_insight = ','.join(
+                    ['?' for _ in range(len(columns_insight))])
+                query_insight = f"INSERT INTO {table_insight} ({', '.join(columns_insight)}) VALUES ({placeholders_insight})"
+
+                # Execute the SQL command
+                cursor.executemany(query_insight, insight_insert_data)
+                conn.commit()
+        
+
+        return JSONResponse(status_code=200, content={"Status": 200, "Message": {"SpreadsheetId": "123"}})
+    except Exception as e:
+        logging.error(f"An error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+    finally:
+        # Ensure all resources are closed
+        if sql_cursor:
+            sql_cursor.close()
+        if conn:
+            conn.close()
