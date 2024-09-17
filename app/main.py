@@ -12,6 +12,7 @@ from pandas import DataFrame
 import pandas as pd
 import os
 import logging
+import pyodbc
 
 app = FastAPI()
 
@@ -42,18 +43,32 @@ async def google_sheet(id: int):
             # Find the index of the 'data_json' column
             data_json_index = column_names.index("data_json")
             spreadsheet_id_index = column_names.index("spreadsheet_id")
+            sheet_id = str(row[spreadsheet_id_index])
+            
             credentials_path = os.path.join(str(row[data_json_index]))
 
             if not os.path.exists(credentials_path):
-                raise HTTPException(status_code=500, detail="Credential file not found.")
+                return JSONResponse(status_code=200,content={"Status": 400, "Message": "Credential file not found."})
 
             credentials = Credentials.from_service_account_file(credentials_path, scopes=scopes)
             client = gspread.authorize(credentials)
 
             print(str(row[spreadsheet_id_index]))
             # Open the Google Sheet
-            sheet = client.open_by_key(str(row[spreadsheet_id_index])).sheet1
+            try:
+                sheet = client.open_by_key(str(row[spreadsheet_id_index])).sheet1
+            except Exception as e:
+                return JSONResponse(status_code=200,content={"Status": 400, "Message": "Không kết nối được sheet."})
             sheet.clear()
+            
+            # Add a new sheet to the Google Sheet
+            # try:
+            #     data_insight = sheet.spreadsheet.add_worksheet(title="Data insights",rows="1000",cols="50")
+            #     data_action = sheet.spreadsheet.add_worksheet(title="Data actions",rows="1000",cols="50")
+            #     data_cost_per_action_type = sheet.spreadsheet.add_worksheet(title="Data cost per action type",rows="1000",cols="50")
+            # except Exception as e:
+            #     logging.error(f"Failed to add new sheet: {str(e)}")
+            #     raise HTTPException(status_code=500, detail=f"Failed to add new sheet: {str(e)}")
 
             # Fetch data to populate the Google Sheet
             sql = '''
@@ -64,7 +79,7 @@ async def google_sheet(id: int):
 
             # Ensure there are rows before proceeding
             if not rows:
-                raise HTTPException(status_code=500, detail="No data returned from the query.")
+                return JSONResponse(status_code=200,content={"Status": 400, "Message": "No data returned from the query."})
 
             # Convert Decimal objects to float
             data = []
@@ -87,22 +102,22 @@ async def google_sheet(id: int):
 
             # Check if the number of columns matches the number of data fields
             if len(columns) != len(data[0]):
-                raise HTTPException(status_code=500, detail="Mismatch between data and columns count.")
+                return JSONResponse(status_code=200,content={"Status": 400, "Message": "Mismatch between data and columns count."})
 
             # Create DataFrame
             df = pd.DataFrame(data, columns=columns)
 
             # Check if DataFrame is empty
             if df.empty:
-                raise HTTPException(status_code=500, detail="DataFrame is empty, cannot update Google Sheet.")
+                return JSONResponse(status_code=200,content={"Status": 400, "Message": "DataFrame is empty, cannot update Google Sheet."})
 
             # Update to Google Sheet
             sheet.update([df.columns.values.tolist()] + df.values.tolist())
 
-            return JSONResponse(status_code=200, content={"Status": 200, "Message": {"SpreadsheetId": str(row[spreadsheet_id_index])}})
+            return JSONResponse(status_code=200, content={"Status": 200, "Message": sheet_id})
     except Exception as e:
         logging.error(f"An error occurred: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        return JSONResponse(status_code=200, content={"Status": 400, "Message": str(e)})
 
     finally:
         # Ensure all resources are closed
@@ -110,7 +125,7 @@ async def google_sheet(id: int):
             sql_cursor.close()
         if conn:
             conn.close()
-
+            
 @app.get("/import_data")
 async def import_data(id: int):
     try:
@@ -276,10 +291,11 @@ async def import_data(id: int):
                 conn.commit()
         
 
-        return JSONResponse(status_code=200, content={"Status": 200, "Message": {"SpreadsheetId": "123"}})
+        return JSONResponse(status_code=200, content={"Status": 200, "Message": "Success"})
     except Exception as e:
         logging.error(f"An error occurred: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        # raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+        return JSONResponse(status_code=400, content={"Status": 200, "Message": str(e)})
 
     finally:
         # Ensure all resources are closed
@@ -287,3 +303,4 @@ async def import_data(id: int):
             sql_cursor.close()
         if conn:
             conn.close()
+
